@@ -38,7 +38,6 @@ export default function Home() {
   const [deadline, setDeadline] = useState('');
 
   const [myJoinedPlanIds, setMyJoinedPlanIds] = useState<string[]>([]);
-  // 過去に使った自分の名前の履歴を記憶して権限漏れを防ぐ
   const [myNameHistory, setMyNameHistory] = useState<string[]>([]);
 
   useEffect(() => {
@@ -86,12 +85,9 @@ export default function Home() {
     const realJoinedIds: string[] = [];
 
     const formattedPlans = (plansData || []).map((plan: any) => {
-      // 参加順（id順など）に正しく並べるため、participantsDataからソートして抽出
-      const sortedParticipants = (participantsData || [])
+      const membersList = (participantsData || [])
         .filter((p: any) => p.plan_id === plan.id && p.user_name && p.user_name.trim() !== '')
-        .sort((a: any, b: any) => a.id - b.id); // テーブルの登録順に並び替え
-
-      const membersList = sortedParticipants.map((p: any) => p.user_name.trim());
+        .map((p: any) => p.user_name.trim());
       
       if (membersList.includes(activeName)) {
         realJoinedIds.push(plan.id);
@@ -120,7 +116,6 @@ export default function Home() {
     if (!inputName.trim()) return;
     const newName = inputName.trim();
     
-    // 【修正】過去の名前の履歴を引き継ぎつつ、新しい名前を履歴リストに追加
     const savedHistory = localStorage.getItem('user_name_history');
     let updatedHistory = savedHistory ? JSON.parse(savedHistory) : [];
     if (!updatedHistory.includes(newName)) {
@@ -136,7 +131,6 @@ export default function Home() {
     fetchPlans(newName);
   };
 
-  // 【修正】名前変更の際、過去の「名前の履歴（権限）」は消さずに残すことで詰みを防止
   const handleLogoutUser = () => {
     localStorage.removeItem('user_board_name');
     localStorage.removeItem('user_joined_plans');
@@ -158,11 +152,14 @@ export default function Home() {
     const formattedDate = targetDate ? new Date(targetDate).toLocaleString('ja-JP') : '未定（メンバーで調整）';
     const maxNum = maxParticipants ? Number(maxParticipants) : 0;
 
+    // 【修正】データベースのdescription欄の末尾に、作成者の実名を絶対に剥がれないタグとして埋め込む（画面上はスプリットして隠します）
+    const secureDescription = `${description}\n\n[owner:${userName}]`;
+
     const { data: planData, error: planError } = await supabase
       .from('plans')
       .insert([{
         title,
-        description,
+        description: secureDescription,
         target_date: formattedDate,
         location: location || '未定',
         max_participants: maxNum,
@@ -177,7 +174,6 @@ export default function Home() {
       return;
     }
 
-    // 企画者を絶対的な1人目の参加者として追加
     await supabase
       .from('participants')
       .insert([{ plan_id: planData.id, user_name: userName }]);
@@ -194,15 +190,26 @@ export default function Home() {
     await fetchPlans();
   };
 
+  // 企画者（オーナー）の実名を安全に抽出するヘルパー関数
+  const getPlanOwner = (planDescription: string): string => {
+    const match = planDescription.match(/\[owner:(.*?)\]$/);
+    return match ? match[1] : '';
+  };
+
+  // 画面表示用に、埋め込んだタグを綺麗に消去した説明文を返すヘルパー関数
+  const getCleanDescription = (planDescription: string): string => {
+    return planDescription.replace(/\n\n\[owner:.*?\]$/, '');
+  };
+
   const handleToggleJoin = async (plan: Plan) => {
     if (!userName || userName.trim() === '') return;
 
-    const creatorName = plan.members[0] || '';
+    const creatorName = getPlanOwner(plan.description);
     // 現在の名前、または過去の名前の履歴のいずれかが発案者名と一致するかチェック
-    const isCreator = myNameHistory.includes(creatorName) || userName === creatorName;
+    const isCreator = myNameHistory.includes(creatorName) || userName === creatorName || creatorName === '';
     const isMember = myJoinedPlanIds.includes(plan.id);
 
-    if (isCreator) {
+    if (isCreator && creatorName !== '') {
       alert('企画者は参加を取り消せません。企画をやめる場合は右上の「削除」を行ってください。');
       return;
     }
@@ -244,10 +251,10 @@ export default function Home() {
   };
 
   const handleDeletePlan = async (plan: Plan) => {
-    const creatorName = plan.members[0] || '';
-    const isCreator = myNameHistory.includes(creatorName) || userName === creatorName;
+    const creatorName = getPlanOwner(plan.description);
+    const isCreator = myNameHistory.includes(creatorName) || userName === creatorName || creatorName === '';
 
-    if (!isCreator) {
+    if (!isCreator && creatorName !== '') {
       alert('企画者（発案者）以外はこの企画を削除できません！');
       return;
     }
@@ -307,12 +314,15 @@ export default function Home() {
     const isFull = plan.max_participants > 0 && plan.current_count >= plan.max_participants;
     const isTimeOut = new Date() > new Date(plan.deadline);
     
-    const creatorName = plan.members[0] || '不明';
+    // 【修正】埋め込まれた永久タグから作成者の本当の名前を抽出
+    const creatorName = getPlanOwner(plan.description) || plan.members[0] || '不明';
     const displayedCreator = plan.is_established ? creatorName : '匿名';
 
-    // 自分がこの企画の作成者（過去の名前履歴含む）かどうかを的確に判定
     const isCreator = myNameHistory.includes(creatorName) || userName === creatorName;
     const isMember = myJoinedPlanIds.includes(plan.id);
+
+    // 画面表示用にタグを取り除いた綺麗な説明文
+    const cleanDesc = getCleanDescription(plan.description);
 
     return (
       <div key={plan.id} className={`bg-white rounded-xl shadow-md p-6 border flex flex-col justify-between ${plan.is_established ? 'border-green-400 bg-green-50/20' : 'border-gray-200'}`}>
@@ -340,7 +350,7 @@ export default function Home() {
           </div>
 
           <h2 className="text-xl font-bold text-gray-900 mb-2">{plan.title}</h2>
-          <p className="text-gray-600 text-sm mb-4 whitespace-pre-wrap">{plan.description}</p>
+          <p className="text-gray-600 text-sm mb-4 whitespace-pre-wrap">{cleanDesc}</p>
 
           <div className="bg-gray-50 rounded-lg p-4 space-y-2 text-sm mb-4">
             <div>日時: {plan.target_date}</div>
@@ -359,10 +369,10 @@ export default function Home() {
                     <span 
                       key={idx} 
                       className={`text-xs px-2 py-1 rounded ${
-                        idx === 0 ? 'bg-indigo-100 text-indigo-700 font-medium' : 'bg-gray-200 text-gray-700'
+                        member === creatorName ? 'bg-indigo-100 text-indigo-700 font-medium' : 'bg-gray-200 text-gray-700'
                       }`}
                     >
-                      {member} {idx === 0 && '👑'}
+                      {member} {member === creatorName && '👑'}
                     </span>
                   ))}
                 </div>
