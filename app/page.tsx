@@ -38,7 +38,8 @@ export default function Home() {
   const [deadline, setDeadline] = useState('');
 
   const [myJoinedPlanIds, setMyJoinedPlanIds] = useState<string[]>([]);
-  const [myCreatedPlanIds, setMyCreatedPlanIds] = useState<string[]>([]);
+  // 過去に使った自分の名前の履歴を記憶して権限漏れを防ぐ
+  const [myNameHistory, setMyNameHistory] = useState<string[]>([]);
 
   useEffect(() => {
     const savedName = localStorage.getItem('user_board_name');
@@ -47,27 +48,23 @@ export default function Home() {
       setUserName(activeName);
       setIsRegistered(true);
       
-      const savedJoined = localStorage.getItem('user_joined_plans');
-      if (savedJoined) {
-        setMyJoinedPlanIds(JSON.parse(savedJoined));
+      const savedHistory = localStorage.getItem('user_name_history');
+      if (savedHistory) {
+        setMyNameHistory(JSON.parse(savedHistory));
+      } else {
+        setMyNameHistory([activeName]);
       }
-      const savedCreated = localStorage.getItem('user_created_plans');
-      if (savedCreated) {
-        setMyCreatedPlanIds(JSON.parse(savedCreated));
-      }
+      
       fetchPlans(activeName);
     } else {
-      // ローカルストレージに名前がない、または空の場合は完全に初期化して登録を促す
       handleLogoutUser();
     }
   }, []);
 
-  // 【完全修正】ログイン名が確定していない状態（空文字など）での不正なデータベース通信を徹底ブロック
   const fetchPlans = async (currentUserName?: string) => {
     const activeName = currentUserName || userName;
     if (!activeName || activeName.trim() === '') return;
 
-    // 1. 全ての企画データを取得
     const { data: plansData, error: plansError } = await supabase
       .from('plans')
       .select('*');
@@ -77,7 +74,6 @@ export default function Home() {
       return;
     }
 
-    // 2. 全ての参加者データを取得
     const { data: participantsData, error: partError } = await supabase
       .from('participants')
       .select('*');
@@ -90,10 +86,12 @@ export default function Home() {
     const realJoinedIds: string[] = [];
 
     const formattedPlans = (plansData || []).map((plan: any) => {
-      // 空文字ユーザーを除外し、この企画に該当する実名リストを安全に抽出
-      const membersList = (participantsData || [])
+      // 参加順（id順など）に正しく並べるため、participantsDataからソートして抽出
+      const sortedParticipants = (participantsData || [])
         .filter((p: any) => p.plan_id === plan.id && p.user_name && p.user_name.trim() !== '')
-        .map((p: any) => p.user_name.trim());
+        .sort((a: any, b: any) => a.id - b.id); // テーブルの登録順に並び替え
+
+      const membersList = sortedParticipants.map((p: any) => p.user_name.trim());
       
       if (membersList.includes(activeName)) {
         realJoinedIds.push(plan.id);
@@ -121,31 +119,37 @@ export default function Home() {
     e.preventDefault();
     if (!inputName.trim()) return;
     const newName = inputName.trim();
+    
+    // 【修正】過去の名前の履歴を引き継ぎつつ、新しい名前を履歴リストに追加
+    const savedHistory = localStorage.getItem('user_name_history');
+    let updatedHistory = savedHistory ? JSON.parse(savedHistory) : [];
+    if (!updatedHistory.includes(newName)) {
+      updatedHistory.push(newName);
+    }
+    
     localStorage.setItem('user_board_name', newName);
+    localStorage.setItem('user_name_history', JSON.stringify(updatedHistory));
+    
     setUserName(newName);
+    setMyNameHistory(updatedHistory);
     setIsRegistered(true);
     fetchPlans(newName);
   };
 
-  // 【完全修正】ログアウト時にすべての状態を安全にリセットし、干渉を完全に防ぐ
+  // 【修正】名前変更の際、過去の「名前の履歴（権限）」は消さずに残すことで詰みを防止
   const handleLogoutUser = () => {
     localStorage.removeItem('user_board_name');
     localStorage.removeItem('user_joined_plans');
-    localStorage.removeItem('user_created_plans');
     setUserName('');
     setIsRegistered(false);
     setInputName('');
     setMyJoinedPlanIds([]);
-    setMyCreatedPlanIds([]);
     setPlans([]);
   };
 
   const handleCreatePlan = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!userName || userName.trim() === '') {
-      alert('ユーザー名が正しく登録されていません。再登録してください。');
-      return;
-    }
+    if (!userName || userName.trim() === '') return;
     if (!title || !deadline || !minParticipants) {
       alert('必須項目（企画名・最低人数・募集期限）を入力してください');
       return;
@@ -173,13 +177,10 @@ export default function Home() {
       return;
     }
 
+    // 企画者を絶対的な1人目の参加者として追加
     await supabase
       .from('participants')
       .insert([{ plan_id: planData.id, user_name: userName }]);
-
-    const updatedCreated = [...myCreatedPlanIds, planData.id];
-    setMyCreatedPlanIds(updatedCreated);
-    localStorage.setItem('user_created_plans', JSON.stringify(updatedCreated));
 
     setShowModal(false);
     setTitle('');
@@ -194,12 +195,11 @@ export default function Home() {
   };
 
   const handleToggleJoin = async (plan: Plan) => {
-    if (!userName || userName.trim() === '') {
-      alert('ユーザー名が登録されていません');
-      return;
-    }
+    if (!userName || userName.trim() === '') return;
 
-    const isCreator = myCreatedPlanIds.includes(plan.id);
+    const creatorName = plan.members[0] || '';
+    // 現在の名前、または過去の名前の履歴のいずれかが発案者名と一致するかチェック
+    const isCreator = myNameHistory.includes(creatorName) || userName === creatorName;
     const isMember = myJoinedPlanIds.includes(plan.id);
 
     if (isCreator) {
@@ -243,8 +243,9 @@ export default function Home() {
     }
   };
 
-  const handleDeletePlan = async (planId: string) => {
-    const isCreator = myCreatedPlanIds.includes(planId);
+  const handleDeletePlan = async (plan: Plan) => {
+    const creatorName = plan.members[0] || '';
+    const isCreator = myNameHistory.includes(creatorName) || userName === creatorName;
 
     if (!isCreator) {
       alert('企画者（発案者）以外はこの企画を削除できません！');
@@ -256,19 +257,15 @@ export default function Home() {
     const { error } = await supabase
       .from('plans')
       .delete()
-      .eq('id', planId);
+      .eq('id', plan.id);
 
     if (error) {
       alert('削除に失敗しました: ' + error.message);
     } else {
-      const updatedCreated = myCreatedPlanIds.filter(id => id !== planId);
-      setMyCreatedPlanIds(updatedCreated);
-      localStorage.setItem('user_created_plans', JSON.stringify(updatedCreated));
       await fetchPlans();
     }
   };
 
-  // ユーザー未登録（あるいは名前変更ボタンを押した直後）は100%確実にログイン画面を表示
   if (!isRegistered || !userName || userName.trim() === '') {
     return (
       <div className="min-h-screen bg-gray-50 flex items-center justify-center p-4">
@@ -306,14 +303,16 @@ export default function Home() {
   });
 
   const renderPlanCard = (plan: Plan) => {
-    const isCreator = myCreatedPlanIds.includes(plan.id);
-    const isMember = myJoinedPlanIds.includes(plan.id);
     const limitText = plan.max_participants > 0 ? `${plan.max_participants}人` : 'なし';
     const isFull = plan.max_participants > 0 && plan.current_count >= plan.max_participants;
     const isTimeOut = new Date() > new Date(plan.deadline);
     
     const creatorName = plan.members[0] || '不明';
     const displayedCreator = plan.is_established ? creatorName : '匿名';
+
+    // 自分がこの企画の作成者（過去の名前履歴含む）かどうかを的確に判定
+    const isCreator = myNameHistory.includes(creatorName) || userName === creatorName;
+    const isMember = myJoinedPlanIds.includes(plan.id);
 
     return (
       <div key={plan.id} className={`bg-white rounded-xl shadow-md p-6 border flex flex-col justify-between ${plan.is_established ? 'border-green-400 bg-green-50/20' : 'border-gray-200'}`}>
@@ -330,7 +329,7 @@ export default function Home() {
               )}
               {isCreator && (
                 <button 
-                  onClick={() => handleDeletePlan(plan.id)}
+                  onClick={() => handleDeletePlan(plan)}
                   className="text-gray-400 hover:text-red-500 text-xs p-1 transition font-medium"
                   title="企画を削除"
                 >
