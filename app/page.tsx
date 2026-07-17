@@ -127,47 +127,85 @@ export default function Home() {
     fetchPlans();
   };
 
-  const handleJoin = async (plan: Plan) => {
+  // 参加およびキャンセルの切り替え処理
+  const handleToggleJoin = async (plan: Plan) => {
     if (!userName) {
       alert('ユーザー名が登録されていません');
       return;
     }
 
-    if (plan.max_participants > 0 && plan.current_count >= plan.max_participants) {
-      alert('申し訳ありません。この企画はすでに最高人数に達しているため参加できません。');
-      return;
-    }
+    const isMember = myJoinedPlanIds.includes(plan.id);
 
-    const { error } = await supabase
-      .from('participants')
-      .insert([{ plan_id: plan.id, user_name: userName }]);
+    if (isMember) {
+      // 内部的な企画者（最初の参加者）はキャンセル（離脱）できないようにガード
+      if (plan.members[0] === userName) {
+        alert('企画者は参加を取り消せません。企画をやめる場合は「削除」を行ってください。');
+        return;
+      }
 
-    if (error) {
-      if (error.code === '23505') {
-        alert('すでにこの企画に参加しています');
+      if (!confirm('この企画への参加を取り消しますか？')) return;
+
+      const { error } = await supabase
+        .from('participants')
+        .delete()
+        .eq('plan_id', plan.id)
+        .eq('user_name', userName);
+
+      if (error) {
+        alert('キャンセルの処理に失敗しました: ' + error.message);
       } else {
-        alert('参加に失敗しました: ' + error.message);
+        const updatedJoined = myJoinedPlanIds.filter(id => id !== plan.id);
+        setMyJoinedPlanIds(updatedJoined);
+        localStorage.setItem('user_joined_plans', JSON.stringify(updatedJoined));
+        fetchPlans();
       }
     } else {
-      const updatedJoined = [...myJoinedPlanIds, plan.id];
-      setMyJoinedPlanIds(updatedJoined);
-      localStorage.setItem('user_joined_plans', JSON.stringify(updatedJoined));
-      fetchPlans();
+      if (plan.max_participants > 0 && plan.current_count >= plan.max_participants) {
+        alert('申し訳ありません。この企画はすでに最高人数に達しているため参加できません。');
+        return;
+      }
+
+      const { error } = await supabase
+        .from('participants')
+        .insert([{ plan_id: plan.id, user_name: userName }]);
+
+      if (error) {
+        if (error.code === '23505') {
+          alert('すでにこの企画に参加しています');
+        } else {
+          alert('参加に失敗しました: ' + error.message);
+        }
+      } else {
+        const updatedJoined = [...myJoinedPlanIds, plan.id];
+        setMyJoinedPlanIds(updatedJoined);
+        localStorage.setItem('user_joined_plans', JSON.stringify(updatedJoined));
+        fetchPlans();
+      }
     }
   };
 
   // 投稿削除処理
-  const handleDeletePlan = async (planId: string) => {
-    if (!confirm('この企画を削除してもよろしいですか？')) return;
+  const handleDeletePlan = async (plan: Plan) => {
+    const creator = plan.members[0];
+
+    if (userName !== creator) {
+      alert('企画者（発案者）以外はこの企画を削除できません！');
+      return;
+    }
+
+    if (!confirm('この企画を削除してもよろしいですか？（元には戻せません）')) return;
 
     const { error } = await supabase
       .from('plans')
       .delete()
-      .eq('id', planId);
+      .eq('id', plan.id);
 
     if (error) {
       alert('削除に失敗しました: ' + error.message);
     } else {
+      const updatedJoined = myJoinedPlanIds.filter(id => id !== plan.id);
+      setMyJoinedPlanIds(updatedJoined);
+      localStorage.setItem('user_joined_plans', JSON.stringify(updatedJoined));
       fetchPlans();
     }
   };
@@ -196,7 +234,6 @@ export default function Home() {
     );
   }
 
-  // 企画を「募集中」と「締め切り（他の部屋）」に自動仕分けする
   const activePlans = plans.filter(plan => {
     const isFull = plan.max_participants > 0 && plan.current_count >= plan.max_participants;
     const isTimeOut = new Date() > new Date(plan.deadline);
@@ -209,18 +246,23 @@ export default function Home() {
     return isFull || isTimeOut || plan.is_established;
   });
 
-  // カードを表示する共通パーツ
   const renderPlanCard = (plan: Plan) => {
     const isMember = myJoinedPlanIds.includes(plan.id);
     const limitText = plan.max_participants > 0 ? `${plan.max_participants}人` : 'なし';
     const isFull = plan.max_participants > 0 && plan.current_count >= plan.max_participants;
     const isTimeOut = new Date() > new Date(plan.deadline);
+    
+    const creatorName = plan.members[0] || '不明';
+    const isCreator = userName === creatorName;
+
+    // 【重要】企画成立時のみ実名公開、それ以外はすべて「匿名」にする
+    const displayedCreator = plan.is_established ? creatorName : '匿名';
 
     return (
       <div key={plan.id} className={`bg-white rounded-xl shadow-md p-6 border flex flex-col justify-between ${plan.is_established ? 'border-green-400 bg-green-50/20' : 'border-gray-200'}`}>
         <div>
           <div className="flex justify-between items-start mb-4">
-            <span className="text-sm font-semibold text-gray-400">企画者: 匿名</span>
+            <span className="text-sm font-semibold text-gray-400">企画者: {displayedCreator}</span>
             <div className="flex items-center gap-2">
               {plan.is_established ? (
                 <span className="bg-green-500 text-white text-xs px-2.5 py-1 rounded-full font-bold">企画成立</span>
@@ -229,13 +271,16 @@ export default function Home() {
               ) : (
                 <span className="bg-amber-500 text-white text-xs px-2.5 py-1 rounded-full font-bold">募集中</span>
               )}
-              <button 
-                onClick={() => handleDeletePlan(plan.id)}
-                className="text-gray-400 hover:text-red-500 text-xs p-1 transition"
-                title="企画を削除"
-              >
-                削除
-              </button>
+              {/* 内部的に自分が作った企画であれば、匿名表示中であっても削除ボタンを出す */}
+              {isCreator && (
+                <button 
+                  onClick={() => handleDeletePlan(plan)}
+                  className="text-gray-400 hover:text-red-500 text-xs p-1 transition font-medium"
+                  title="企画を削除"
+                >
+                  削除
+                </button>
+              )}
             </div>
           </div>
 
@@ -253,11 +298,26 @@ export default function Home() {
           <div className="mb-4">
             <div className="text-xs font-bold text-gray-400 mb-1">現在の参加メンバー:</div>
             <div className="flex flex-wrap gap-1.5">
-              {plan.members.map((member, idx) => (
-                <span key={idx} className="bg-gray-200 text-gray-700 text-xs px-2 py-1 rounded">
-                  {member}
-                </span>
-              ))}
+              {plan.members.map((member, idx) => {
+                // 【重要】成立時は実名＋企画者マーク、未成立時はすべて「匿名」表示
+                const isCurrentMemberCreator = member === creatorName;
+                const displayedMemberName = plan.is_established 
+                  ? (isCurrentMemberCreator ? `${member} 👑` : member)
+                  : `匿名メンバー${idx + 1}`;
+
+                return (
+                  <span 
+                    key={idx} 
+                    className={`text-xs px-2 py-1 rounded ${
+                      plan.is_established && isCurrentMemberCreator 
+                        ? 'bg-indigo-100 text-indigo-700 font-medium' 
+                        : 'bg-gray-200 text-gray-700'
+                    }`}
+                  >
+                    {displayedMemberName}
+                  </span>
+                );
+              })}
             </div>
           </div>
         </div>
@@ -267,17 +327,20 @@ export default function Home() {
             <div className="text-center bg-green-600 text-white font-bold py-3 px-4 rounded-lg shadow">
               企画が成立しました。メンバー間で連絡を確認してください。
             </div>
-          ) : isMember ? (
-            <div className="text-center bg-gray-100 text-gray-500 text-sm font-medium py-2.5 rounded-lg border border-dashed">
-              参加申込み済みです
-            </div>
           ) : (isFull || isTimeOut) ? (
             <div className="text-center bg-gray-100 text-gray-400 text-sm font-medium py-2.5 rounded-lg border border-gray-200">
               この募集は締め切られました
             </div>
+          ) : isMember ? (
+            <button 
+              onClick={() => handleToggleJoin(plan)}
+              className="w-full bg-red-50 hover:bg-red-100 text-red-600 text-sm font-medium py-2.5 rounded-lg border border-red-200 transition"
+            >
+              参加を取り消す（キャンセル）
+            </button>
           ) : (
             <button 
-              onClick={() => handleJoin(plan)}
+              onClick={() => handleToggleJoin(plan)}
               className="w-full bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-medium py-2.5 rounded-lg transition"
             >
               この企画に参加する
