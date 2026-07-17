@@ -47,6 +47,11 @@ export default function Home() {
       setUserName(activeName);
       setIsRegistered(true);
       
+      const savedJoined = localStorage.getItem('user_joined_plans');
+      if (savedJoined) {
+        setMyJoinedPlanIds(JSON.parse(savedJoined));
+      }
+      
       const savedHistory = localStorage.getItem('user_name_history');
       if (savedHistory) {
         setMyNameHistory(JSON.parse(savedHistory));
@@ -82,14 +87,20 @@ export default function Home() {
       return;
     }
 
-    const realJoinedIds: string[] = [];
+    // ローカルストレージ内の過去の参加ID履歴をベースにするため、ここではDBとの強制的な全消去による同期はせず、
+    // DB側に自分の現在の名前があれば履歴をマージする形に補強します
+    const savedJoined = localStorage.getItem('user_joined_plans');
+    const localJoinedIds: string[] = savedJoined ? JSON.parse(savedJoined) : [];
+    const realJoinedIds = [...localJoinedIds];
 
     const formattedPlans = (plansData || []).map((plan: any) => {
       const membersList = (participantsData || [])
         .filter((p: any) => p.plan_id === plan.id && p.user_name && p.user_name.trim() !== '')
         .map((p: any) => p.user_name.trim());
       
-      if (membersList.includes(activeName)) {
+      // DB側に現在の名前、または過去の名前のいずれかが残っていれば、参加済みリストに確実に登録
+      const hasAnyNameInDb = membersList.some(m => m === activeName || myNameHistory.includes(m));
+      if (hasAnyNameInDb && !realJoinedIds.includes(plan.id)) {
         realJoinedIds.push(plan.id);
       }
 
@@ -131,13 +142,12 @@ export default function Home() {
     fetchPlans(newName);
   };
 
+  // 【修正】名前の変更時、多重参加を防ぐために「参加した企画のID（user_joined_plans）」は絶対に消さずに残す！！
   const handleLogoutUser = () => {
     localStorage.removeItem('user_board_name');
-    localStorage.removeItem('user_joined_plans');
     setUserName('');
     setIsRegistered(false);
     setInputName('');
-    setMyJoinedPlanIds([]);
     setPlans([]);
   };
 
@@ -152,7 +162,6 @@ export default function Home() {
     const formattedDate = targetDate ? new Date(targetDate).toLocaleString('ja-JP') : '未定（メンバーで調整）';
     const maxNum = maxParticipants ? Number(maxParticipants) : 0;
 
-    // 【修正】データベースのdescription欄の末尾に、作成者の実名を絶対に剥がれないタグとして埋め込む（画面上はスプリットして隠します）
     const secureDescription = `${description}\n\n[owner:${userName}]`;
 
     const { data: planData, error: planError } = await supabase
@@ -178,6 +187,11 @@ export default function Home() {
       .from('participants')
       .insert([{ plan_id: planData.id, user_name: userName }]);
 
+    // 自分が作った企画も、当然参加済みIDに加える
+    const updatedJoined = [...myJoinedPlanIds, planData.id];
+    setMyJoinedPlanIds(updatedJoined);
+    localStorage.setItem('user_joined_plans', JSON.stringify(updatedJoined));
+
     setShowModal(false);
     setTitle('');
     setDescription('');
@@ -190,13 +204,11 @@ export default function Home() {
     await fetchPlans();
   };
 
-  // 企画者（オーナー）の実名を安全に抽出するヘルパー関数
   const getPlanOwner = (planDescription: string): string => {
     const match = planDescription.match(/\[owner:(.*?)\]$/);
     return match ? match[1] : '';
   };
 
-  // 画面表示用に、埋め込んだタグを綺麗に消去した説明文を返すヘルパー関数
   const getCleanDescription = (planDescription: string): string => {
     return planDescription.replace(/\n\n\[owner:.*?\]$/, '');
   };
@@ -205,7 +217,6 @@ export default function Home() {
     if (!userName || userName.trim() === '') return;
 
     const creatorName = getPlanOwner(plan.description);
-    // 現在の名前、または過去の名前の履歴のいずれかが発案者名と一致するかチェック
     const isCreator = myNameHistory.includes(creatorName) || userName === creatorName || creatorName === '';
     const isMember = myJoinedPlanIds.includes(plan.id);
 
@@ -217,15 +228,22 @@ export default function Home() {
     if (isMember) {
       if (!confirm('この企画への参加を取り消しますか？')) return;
 
+      // 【修正】過去の名前、あるいは現在の名前、データベースに残っている方を柔軟に削除ターゲットにする
+      // 基本的には現在のuserName、見つからなければ過去の履歴に一致するものをDBから消去
+      const targetDeleteName = plan.members.find(m => m === userName) || plan.members.find(m => myNameHistory.includes(m)) || userName;
+
       const { error } = await supabase
         .from('participants')
         .delete()
         .eq('plan_id', plan.id)
-        .eq('user_name', userName);
+        .eq('user_name', targetDeleteName);
 
       if (error) {
         alert('キャンセルの処理に失敗しました: ' + error.message);
       } else {
+        const updatedJoined = myJoinedPlanIds.filter(id => id !== plan.id);
+        setMyJoinedPlanIds(updatedJoined);
+        localStorage.setItem('user_joined_plans', JSON.stringify(updatedJoined));
         await fetchPlans();
       }
     } else {
@@ -245,6 +263,9 @@ export default function Home() {
           alert('参加に失敗しました: ' + error.message);
         }
       } else {
+        const updatedJoined = [...myJoinedPlanIds, plan.id];
+        setMyJoinedPlanIds(updatedJoined);
+        localStorage.setItem('user_joined_plans', JSON.stringify(updatedJoined));
         await fetchPlans();
       }
     }
@@ -314,14 +335,12 @@ export default function Home() {
     const isFull = plan.max_participants > 0 && plan.current_count >= plan.max_participants;
     const isTimeOut = new Date() > new Date(plan.deadline);
     
-    // 【修正】埋め込まれた永久タグから作成者の本当の名前を抽出
     const creatorName = getPlanOwner(plan.description) || plan.members[0] || '不明';
     const displayedCreator = plan.is_established ? creatorName : '匿名';
 
     const isCreator = myNameHistory.includes(creatorName) || userName === creatorName;
     const isMember = myJoinedPlanIds.includes(plan.id);
 
-    // 画面表示用にタグを取り除いた綺麗な説明文
     const cleanDesc = getCleanDescription(plan.description);
 
     return (
