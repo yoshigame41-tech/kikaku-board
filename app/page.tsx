@@ -45,20 +45,24 @@ export default function Home() {
     if (savedName) {
       setUserName(savedName);
       setIsRegistered(true);
+      
+      const savedJoined = localStorage.getItem('user_joined_plans');
+      if (savedJoined) {
+        setMyJoinedPlanIds(JSON.parse(savedJoined));
+      }
+      const savedCreated = localStorage.getItem('user_created_plans');
+      if (savedCreated) {
+        setMyCreatedPlanIds(JSON.parse(savedCreated));
+      }
+      fetchPlans(savedName);
     }
-    const savedJoined = localStorage.getItem('user_joined_plans');
-    if (savedJoined) {
-      setMyJoinedPlanIds(JSON.parse(savedJoined));
-    }
-    const savedCreated = localStorage.getItem('user_created_plans');
-    if (savedCreated) {
-      setMyCreatedPlanIds(JSON.parse(savedCreated));
-    }
-    fetchPlans();
   }, []);
 
-  const fetchPlans = async () => {
-    // 1. まず全ての企画を取得
+  // 【修正】現在の有効なユーザー名を引数で受け取るようにして判定のズレを完全に排除
+  const fetchPlans = async (currentUserName?: string) => {
+    const activeName = currentUserName || userName;
+    if (!activeName) return;
+
     const { data: plansData, error: plansError } = await supabase
       .from('plans')
       .select('*');
@@ -68,7 +72,6 @@ export default function Home() {
       return;
     }
 
-    // 2. 全ての参加者データをまとめて取得してフロント側で安全にマッピング
     const { data: participantsData, error: partError } = await supabase
       .from('participants')
       .select('*');
@@ -78,17 +81,14 @@ export default function Home() {
       return;
     }
 
-    // ローカルストレージとデータベースの同期を取るための配列
     const realJoinedIds: string[] = [];
 
     const formattedPlans = (plansData || []).map((plan: any) => {
-      // この企画に紐づく参加者の実名リストを抽出
       const membersList = (participantsData || [])
         .filter((p: any) => p.plan_id === plan.id)
         .map((p: any) => p.user_name);
       
-      // 自分がこの企画に参加しているか、データベースの実データから直接判定
-      if (membersList.includes(userName)) {
+      if (membersList.includes(activeName)) {
         realJoinedIds.push(plan.id);
       }
 
@@ -105,7 +105,6 @@ export default function Home() {
       };
     });
 
-    // 参加状況を最新の状態に強制同期
     setMyJoinedPlanIds(realJoinedIds);
     localStorage.setItem('user_joined_plans', JSON.stringify(realJoinedIds));
     setPlans(formattedPlans as Plan[]);
@@ -114,21 +113,22 @@ export default function Home() {
   const handleRegisterUser = (e: React.FormEvent) => {
     e.preventDefault();
     if (!inputName.trim()) return;
-    localStorage.setItem('user_board_name', inputName.trim());
-    setUserName(inputName.trim());
+    const newName = inputName.trim();
+    localStorage.setItem('user_board_name', newName);
+    setUserName(newName);
     setIsRegistered(true);
-    fetchPlans();
+    fetchPlans(newName);
   };
 
+  // 【修正】強制的な上書きバグを防ぐため、状態を完全に空にしてリセット
   const handleLogoutUser = () => {
-    localStorage.removeItem('user_board_name');
-    localStorage.removeItem('user_joined_plans');
-    localStorage.removeItem('user_created_plans');
+    localStorage.clear(); // ローカルストレージを完全消去
     setUserName('');
     setIsRegistered(false);
     setInputName('');
     setMyJoinedPlanIds([]);
     setMyCreatedPlanIds([]);
+    setPlans([]);
   };
 
   const handleCreatePlan = async (e: React.FormEvent) => {
@@ -160,7 +160,6 @@ export default function Home() {
       return;
     }
 
-    // 企画者を最初の参加者としてデータベースに挿入
     await supabase
       .from('participants')
       .insert([{ plan_id: planData.id, user_name: userName }]);
@@ -178,7 +177,6 @@ export default function Home() {
     setMinParticipants(2);
     setMaxParticipants('');
     
-    // データの再読み込み（ここでカウントや参加フラグが100%正しく同期されます）
     await fetchPlans();
   };
 
@@ -199,7 +197,6 @@ export default function Home() {
     if (isMember) {
       if (!confirm('この企画への参加を取り消しますか？')) return;
 
-      // 門番が外れたため、実名での狙い撃ち削除が100%確実に成功します
       const { error } = await supabase
         .from('participants')
         .delete()
