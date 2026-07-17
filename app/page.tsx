@@ -29,11 +29,13 @@ export default function Home() {
   const [isRegistered, setIsRegistered] = useState<boolean>(false);
   const [inputName, setInputName] = useState<string>('');
 
+  // フォーム入力用の状態
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
   const [targetDate, setTargetDate] = useState('');
   const [location, setLocation] = useState('');
-  const [minParticipants, setMinParticipants] = useState<number>(2);
+  // 【修正】入力バグを防ぐため、最低人数も一時的に文字列で管理
+  const [minParticipants, setMinParticipants] = useState<string>('2');
   const [maxParticipants, setMaxParticipants] = useState<string>('');
   const [deadline, setDeadline] = useState('');
 
@@ -87,8 +89,6 @@ export default function Home() {
       return;
     }
 
-    // ローカルストレージ内の過去の参加ID履歴をベースにするため、ここではDBとの強制的な全消去による同期はせず、
-    // DB側に自分の現在の名前があれば履歴をマージする形に補強します
     const savedJoined = localStorage.getItem('user_joined_plans');
     const localJoinedIds: string[] = savedJoined ? JSON.parse(savedJoined) : [];
     const realJoinedIds = [...localJoinedIds];
@@ -98,7 +98,6 @@ export default function Home() {
         .filter((p: any) => p.plan_id === plan.id && p.user_name && p.user_name.trim() !== '')
         .map((p: any) => p.user_name.trim());
       
-      // DB側に現在の名前、または過去の名前のいずれかが残っていれば、参加済みリストに確実に登録
       const hasAnyNameInDb = membersList.some(m => m === activeName || myNameHistory.includes(m));
       if (hasAnyNameInDb && !realJoinedIds.includes(plan.id)) {
         realJoinedIds.push(plan.id);
@@ -142,7 +141,6 @@ export default function Home() {
     fetchPlans(newName);
   };
 
-  // 【修正】名前の変更時、多重参加を防ぐために「参加した企画のID（user_joined_plans）」は絶対に消さずに残す！！
   const handleLogoutUser = () => {
     localStorage.removeItem('user_board_name');
     setUserName('');
@@ -151,11 +149,24 @@ export default function Home() {
     setPlans([]);
   };
 
+  // 【修正】キャンセル時や投稿後にフォームを綺麗に初期化する関数
+  const resetFormFields = () => {
+    setTitle('');
+    setDescription('');
+    setTargetDate('');
+    setLocation('');
+    setMinParticipants('2');
+    setMaxParticipants('');
+    setDeadline('');
+  };
+
   const handleCreatePlan = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!userName || userName.trim() === '') return;
-    if (!title || !deadline || !minParticipants) {
-      alert('必須項目（企画名・最低人数・募集期限）を入力してください');
+    
+    const minNum = Number(minParticipants);
+    if (!title || !deadline || isNaN(minNum) || minNum < 2) {
+      alert('必須項目（企画名・2人以上の最低人数・募集期限）を正しく入力してください');
       return;
     }
 
@@ -172,7 +183,7 @@ export default function Home() {
         target_date: formattedDate,
         location: location || '未定',
         max_participants: maxNum,
-        min_participants: minParticipants,
+        min_participants: minNum,
         deadline: new Date(deadline).toISOString()
       }])
       .select()
@@ -187,19 +198,13 @@ export default function Home() {
       .from('participants')
       .insert([{ plan_id: planData.id, user_name: userName }]);
 
-    // 自分が作った企画も、当然参加済みIDに加える
     const updatedJoined = [...myJoinedPlanIds, planData.id];
     setMyJoinedPlanIds(updatedJoined);
     localStorage.setItem('user_joined_plans', JSON.stringify(updatedJoined));
 
     setShowModal(false);
-    setTitle('');
-    setDescription('');
-    setTargetDate('');
-    setLocation('');
-    setDeadline('');
-    setMinParticipants(2);
-    setMaxParticipants('');
+    // 【修正】次回作成時に残らないようフォームをリセット
+    resetFormFields();
     
     await fetchPlans();
   };
@@ -228,8 +233,6 @@ export default function Home() {
     if (isMember) {
       if (!confirm('この企画への参加を取り消しますか？')) return;
 
-      // 【修正】過去の名前、あるいは現在の名前、データベースに残っている方を柔軟に削除ターゲットにする
-      // 基本的には現在のuserName、見つからなければ過去の履歴に一致するものをDBから消去
       const targetDeleteName = plan.members.find(m => m === userName) || plan.members.find(m => myNameHistory.includes(m)) || userName;
 
       const { error } = await supabase
@@ -494,7 +497,13 @@ export default function Home() {
               </div>
               <div className="grid grid-cols-2 gap-2">
                 <div>
-                  <label className="block text-xs font-bold text-gray-500 mb-1">実施日時(空欄で未定)</label>
+                  <div className="flex justify-between items-center mb-1">
+                    <label className="block text-xs font-bold text-gray-500">実施日時(空欄で未定)</label>
+                    {/* 【修正】一度選択した日時を未定に戻せるリセットボタン */}
+                    {targetDate && (
+                      <button type="button" onClick={() => setTargetDate('')} className="text-[10px] text-red-500 hover:underline">✕ 未定に戻す</button>
+                    )}
+                  </div>
                   <input type="datetime-local" value={targetDate} onChange={(e) => setTargetDate(e.target.value)} className="w-full border rounded-lg p-2 text-sm" />
                 </div>
                 <div>
@@ -505,11 +514,12 @@ export default function Home() {
               <div className="grid grid-cols-2 gap-2">
                 <div>
                   <label className="block text-xs font-bold text-gray-500 mb-1">最低人数 *</label>
-                  <input type="number" min={2} required value={minParticipants} onChange={(e) => setMinParticipants(Number(e.target.value))} className="w-full border rounded-lg p-2 text-sm" />
+                  {/* 【修正】03などのバグを防ぐため、文字列のまま管理してスムーズな入力を実現 */}
+                  <input type="number" min={2} required value={minParticipants} onChange={(e) => setMinParticipants(e.target.value)} className="w-full border rounded-lg p-2 text-sm" />
                 </div>
                 <div>
                   <label className="block text-xs font-bold text-gray-500 mb-1">最高人数（空欄で制限なし）</label>
-                  <input type="number" min={minParticipants} value={maxParticipants} onChange={(e) => setMaxParticipants(e.target.value)} className="w-full border rounded-lg p-2 text-sm" placeholder="制限なし" />
+                  <input type="number" min={Number(minParticipants) || 2} value={maxParticipants} onChange={(e) => setMaxParticipants(e.target.value)} className="w-full border rounded-lg p-2 text-sm" placeholder="制限なし" />
                 </div>
               </div>
               <div>
@@ -517,7 +527,8 @@ export default function Home() {
                 <input type="datetime-local" required value={deadline} onChange={(e) => setDeadline(e.target.value)} className="w-full border rounded-lg p-2 text-sm" />
               </div>
               <div className="flex justify-end gap-2 pt-2">
-                <button type="button" onClick={() => setShowModal(false)} className="bg-gray-100 hover:bg-gray-200 text-gray-600 font-medium py-2 px-4 rounded-lg text-sm">キャンセル</button>
+                {/* 【修正】キャンセルボタンを押したときも中身を綺麗にリセットする */}
+                <button type="button" onClick={() => { setShowModal(false); resetFormFields(); }} className="bg-gray-100 hover:bg-gray-200 text-gray-600 font-medium py-2 px-4 rounded-lg text-sm">キャンセル</button>
                 <button type="submit" className="bg-indigo-600 hover:bg-indigo-700 text-white font-medium py-2 px-4 rounded-lg text-sm">公開する</button>
               </div>
             </form>
