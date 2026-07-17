@@ -38,6 +38,8 @@ export default function Home() {
   const [deadline, setDeadline] = useState('');
 
   const [myJoinedPlanIds, setMyJoinedPlanIds] = useState<string[]>([]);
+  // 自分が作成した企画のIDを確実に追跡するための状態
+  const [myCreatedPlanIds, setMyCreatedPlanIds] = useState<string[]>([]);
 
   useEffect(() => {
     const savedName = localStorage.getItem('user_board_name');
@@ -48,6 +50,11 @@ export default function Home() {
     const savedJoined = localStorage.getItem('user_joined_plans');
     if (savedJoined) {
       setMyJoinedPlanIds(JSON.parse(savedJoined));
+    }
+    // 自分が作った企画のリストをローカルストレージから復元
+    const savedCreated = localStorage.getItem('user_created_plans');
+    if (savedCreated) {
+      setMyCreatedPlanIds(JSON.parse(savedCreated));
     }
     fetchPlans();
   }, []);
@@ -73,10 +80,12 @@ export default function Home() {
   const handleLogoutUser = () => {
     localStorage.removeItem('user_board_name');
     localStorage.removeItem('user_joined_plans');
+    localStorage.removeItem('user_created_plans');
     setUserName('');
     setIsRegistered(false);
     setInputName('');
     setMyJoinedPlanIds([]);
+    setMyCreatedPlanIds([]);
   };
 
   const handleCreatePlan = async (e: React.FormEvent) => {
@@ -112,9 +121,15 @@ export default function Home() {
       .from('participants')
       .insert([{ plan_id: planData.id, user_name: userName }]);
 
+    // 参加済みリストの更新
     const updatedJoined = [...myJoinedPlanIds, planData.id];
     setMyJoinedPlanIds(updatedJoined);
     localStorage.setItem('user_joined_plans', JSON.stringify(updatedJoined));
+
+    // 【修正】自分が作った企画のリストにIDを追加して記憶する
+    const updatedCreated = [...myCreatedPlanIds, planData.id];
+    setMyCreatedPlanIds(updatedCreated);
+    localStorage.setItem('user_created_plans', JSON.stringify(updatedCreated));
 
     setShowModal(false);
     setTitle('');
@@ -134,17 +149,19 @@ export default function Home() {
       return;
     }
 
+    const isCreator = myCreatedPlanIds.includes(plan.id);
     const isMember = myJoinedPlanIds.includes(plan.id);
 
-    if (isMember) {
-      // 内部的な企画者（最初の参加者）はキャンセル（離脱）できないようにガード
-      if (plan.members[0] === userName) {
-        alert('企画者は参加を取り消せません。企画をやめる場合は「削除」を行ってください。');
-        return;
-      }
+    // 自分が作った企画（企画者）の場合は絶対にキャンセルさせないガード
+    if (isCreator) {
+      alert('企画者は参加を取り消せません。企画をやめる場合は右上の「削除」を行ってください。');
+      return;
+    }
 
+    if (isMember) {
       if (!confirm('この企画への参加を取り消しますか？')) return;
 
+      // 一般参加者のキャンセル処理
       const { error } = await supabase
         .from('participants')
         .delete()
@@ -160,6 +177,7 @@ export default function Home() {
         fetchPlans();
       }
     } else {
+      // 通常の参加処理
       if (plan.max_participants > 0 && plan.current_count >= plan.max_participants) {
         alert('申し訳ありません。この企画はすでに最高人数に達しているため参加できません。');
         return;
@@ -185,10 +203,11 @@ export default function Home() {
   };
 
   // 投稿削除処理
-  const handleDeletePlan = async (plan: Plan) => {
-    const creator = plan.members[0];
+  const handleDeletePlan = async (planId: string) => {
+    const isCreator = myCreatedPlanIds.includes(planId);
 
-    if (userName !== creator) {
+    // ローカルストレージの情報をもとに厳密に作成者チェック
+    if (!isCreator) {
       alert('企画者（発案者）以外はこの企画を削除できません！');
       return;
     }
@@ -198,14 +217,20 @@ export default function Home() {
     const { error } = await supabase
       .from('plans')
       .delete()
-      .eq('id', plan.id);
+      .eq('id', planId);
 
     if (error) {
       alert('削除に失敗しました: ' + error.message);
     } else {
-      const updatedJoined = myJoinedPlanIds.filter(id => id !== plan.id);
+      // 削除に成功したら各種記憶から消去
+      const updatedJoined = myJoinedPlanIds.filter(id => id !== planId);
       setMyJoinedPlanIds(updatedJoined);
       localStorage.setItem('user_joined_plans', JSON.stringify(updatedJoined));
+
+      const updatedCreated = myCreatedPlanIds.filter(id => id !== planId);
+      setMyCreatedPlanIds(updatedCreated);
+      localStorage.setItem('user_created_plans', JSON.stringify(updatedCreated));
+
       fetchPlans();
     }
   };
@@ -247,15 +272,14 @@ export default function Home() {
   });
 
   const renderPlanCard = (plan: Plan) => {
+    const isCreator = myCreatedPlanIds.includes(plan.id);
     const isMember = myJoinedPlanIds.includes(plan.id);
     const limitText = plan.max_participants > 0 ? `${plan.max_participants}人` : 'なし';
     const isFull = plan.max_participants > 0 && plan.current_count >= plan.max_participants;
     const isTimeOut = new Date() > new Date(plan.deadline);
     
+    // 成立時のみ1人目の名前を出し、未成立時は「匿名」にする
     const creatorName = plan.members[0] || '不明';
-    const isCreator = userName === creatorName;
-
-    // 【重要】企画成立時のみ実名公開、それ以外はすべて「匿名」にする
     const displayedCreator = plan.is_established ? creatorName : '匿名';
 
     return (
@@ -271,10 +295,10 @@ export default function Home() {
               ) : (
                 <span className="bg-amber-500 text-white text-xs px-2.5 py-1 rounded-full font-bold">募集中</span>
               )}
-              {/* 内部的に自分が作った企画であれば、匿名表示中であっても削除ボタンを出す */}
+              {/* 【修正】自分が作った企画であれば、データが匿名化されていても確実に削除ボタンを表示 */}
               {isCreator && (
                 <button 
-                  onClick={() => handleDeletePlan(plan)}
+                  onClick={() => handleDeletePlan(plan.id)}
                   className="text-gray-400 hover:text-red-500 text-xs p-1 transition font-medium"
                   title="企画を削除"
                 >
@@ -299,8 +323,7 @@ export default function Home() {
             <div className="text-xs font-bold text-gray-400 mb-1">現在の参加メンバー:</div>
             <div className="flex flex-wrap gap-1.5">
               {plan.members.map((member, idx) => {
-                // 【重要】成立時は実名＋企画者マーク、未成立時はすべて「匿名」表示
-                const isCurrentMemberCreator = member === creatorName;
+                const isCurrentMemberCreator = idx === 0; // 1人目を暫定の作成者とする（成立時用）
                 const displayedMemberName = plan.is_established 
                   ? (isCurrentMemberCreator ? `${member} 👑` : member)
                   : `匿名メンバー${idx + 1}`;
@@ -331,7 +354,13 @@ export default function Home() {
             <div className="text-center bg-gray-100 text-gray-400 text-sm font-medium py-2.5 rounded-lg border border-gray-200">
               この募集は締め切られました
             </div>
+          ) : isCreator ? (
+            /* 【修正】自分が企画者の場合は、ボタンを解放せず「参加申込み済み（固定）」の状態に戻す */
+            <div className="text-center bg-gray-100 text-gray-500 text-sm font-medium py-2.5 rounded-lg border border-dashed">
+              参加申込み済みです（企画者）
+            </div>
           ) : isMember ? (
+            /* 一般の参加メンバーにのみ、このキャンセルボタンを解放する */
             <button 
               onClick={() => handleToggleJoin(plan)}
               className="w-full bg-red-50 hover:bg-red-100 text-red-600 text-sm font-medium py-2.5 rounded-lg border border-red-200 transition"
@@ -370,7 +399,6 @@ export default function Home() {
       </header>
 
       <main className="max-w-5xl mx-auto space-y-12">
-        {/* 募集中の部屋 */}
         <div>
           <h2 className="text-lg font-bold text-gray-900 mb-4 pb-2 border-b-2 border-indigo-500 inline-block">現在募集中の企画</h2>
           {activePlans.length === 0 ? (
@@ -382,7 +410,6 @@ export default function Home() {
           )}
         </div>
 
-        {/* 締め切られた部屋 */}
         <div>
           <h2 className="text-lg font-bold text-gray-500 mb-4 pb-2 border-b-2 border-gray-400 inline-block">終了・成立した企画</h2>
           {closedPlans.length === 0 ? (
