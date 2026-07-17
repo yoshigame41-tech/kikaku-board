@@ -42,8 +42,9 @@ export default function Home() {
 
   useEffect(() => {
     const savedName = localStorage.getItem('user_board_name');
-    if (savedName) {
-      setUserName(savedName);
+    if (savedName && savedName.trim() !== '') {
+      const activeName = savedName.trim();
+      setUserName(activeName);
       setIsRegistered(true);
       
       const savedJoined = localStorage.getItem('user_joined_plans');
@@ -54,15 +55,19 @@ export default function Home() {
       if (savedCreated) {
         setMyCreatedPlanIds(JSON.parse(savedCreated));
       }
-      fetchPlans(savedName);
+      fetchPlans(activeName);
+    } else {
+      // ローカルストレージに名前がない、または空の場合は完全に初期化して登録を促す
+      handleLogoutUser();
     }
   }, []);
 
-  // 【修正】現在の有効なユーザー名を引数で受け取るようにして判定のズレを完全に排除
+  // 【完全修正】ログイン名が確定していない状態（空文字など）での不正なデータベース通信を徹底ブロック
   const fetchPlans = async (currentUserName?: string) => {
     const activeName = currentUserName || userName;
-    if (!activeName) return;
+    if (!activeName || activeName.trim() === '') return;
 
+    // 1. 全ての企画データを取得
     const { data: plansData, error: plansError } = await supabase
       .from('plans')
       .select('*');
@@ -72,6 +77,7 @@ export default function Home() {
       return;
     }
 
+    // 2. 全ての参加者データを取得
     const { data: participantsData, error: partError } = await supabase
       .from('participants')
       .select('*');
@@ -84,9 +90,10 @@ export default function Home() {
     const realJoinedIds: string[] = [];
 
     const formattedPlans = (plansData || []).map((plan: any) => {
+      // 空文字ユーザーを除外し、この企画に該当する実名リストを安全に抽出
       const membersList = (participantsData || [])
-        .filter((p: any) => p.plan_id === plan.id)
-        .map((p: any) => p.user_name);
+        .filter((p: any) => p.plan_id === plan.id && p.user_name && p.user_name.trim() !== '')
+        .map((p: any) => p.user_name.trim());
       
       if (membersList.includes(activeName)) {
         realJoinedIds.push(plan.id);
@@ -120,9 +127,11 @@ export default function Home() {
     fetchPlans(newName);
   };
 
-  // 【修正】強制的な上書きバグを防ぐため、状態を完全に空にしてリセット
+  // 【完全修正】ログアウト時にすべての状態を安全にリセットし、干渉を完全に防ぐ
   const handleLogoutUser = () => {
-    localStorage.clear(); // ローカルストレージを完全消去
+    localStorage.removeItem('user_board_name');
+    localStorage.removeItem('user_joined_plans');
+    localStorage.removeItem('user_created_plans');
     setUserName('');
     setIsRegistered(false);
     setInputName('');
@@ -133,6 +142,10 @@ export default function Home() {
 
   const handleCreatePlan = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!userName || userName.trim() === '') {
+      alert('ユーザー名が正しく登録されていません。再登録してください。');
+      return;
+    }
     if (!title || !deadline || !minParticipants) {
       alert('必須項目（企画名・最低人数・募集期限）を入力してください');
       return;
@@ -181,7 +194,7 @@ export default function Home() {
   };
 
   const handleToggleJoin = async (plan: Plan) => {
-    if (!userName) {
+    if (!userName || userName.trim() === '') {
       alert('ユーザー名が登録されていません');
       return;
     }
@@ -254,6 +267,31 @@ export default function Home() {
       await fetchPlans();
     }
   };
+
+  // ユーザー未登録（あるいは名前変更ボタンを押した直後）は100%確実にログイン画面を表示
+  if (!isRegistered || !userName || userName.trim() === '') {
+    return (
+      <div className="min-h-screen bg-gray-50 flex items-center justify-center p-4">
+        <div className="bg-white rounded-xl shadow-md max-w-md w-full p-6 text-center">
+          <h2 className="text-xl font-bold text-gray-900 mb-2">利用登録</h2>
+          <p className="text-sm text-gray-500 mb-6">アプリ内で使用するあなたの名前を入力してください。</p>
+          <form onSubmit={handleRegisterUser} className="space-y-4">
+            <input 
+              type="text" 
+              required 
+              value={inputName} 
+              onChange={(e) => setInputName(e.target.value)} 
+              className="w-full border rounded-lg p-3 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500" 
+              placeholder="例: 太郎" 
+            />
+            <button type="submit" className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-medium py-3 rounded-lg text-sm transition">
+              登録してはじめる
+            </button>
+          </form>
+        </div>
+      </div>
+    );
+  }
 
   const activePlans = plans.filter(plan => {
     const isFull = plan.max_participants > 0 && plan.current_count >= plan.max_participants;
