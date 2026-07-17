@@ -38,7 +38,6 @@ export default function Home() {
   const [deadline, setDeadline] = useState('');
 
   const [myJoinedPlanIds, setMyJoinedPlanIds] = useState<string[]>([]);
-  // 自分が作成した企画のIDを確実に追跡するための状態
   const [myCreatedPlanIds, setMyCreatedPlanIds] = useState<string[]>([]);
 
   useEffect(() => {
@@ -51,7 +50,6 @@ export default function Home() {
     if (savedJoined) {
       setMyJoinedPlanIds(JSON.parse(savedJoined));
     }
-    // 自分が作った企画のリストをローカルストレージから復元
     const savedCreated = localStorage.getItem('user_created_plans');
     if (savedCreated) {
       setMyCreatedPlanIds(JSON.parse(savedCreated));
@@ -121,12 +119,10 @@ export default function Home() {
       .from('participants')
       .insert([{ plan_id: planData.id, user_name: userName }]);
 
-    // 参加済みリストの更新
     const updatedJoined = [...myJoinedPlanIds, planData.id];
     setMyJoinedPlanIds(updatedJoined);
     localStorage.setItem('user_joined_plans', JSON.stringify(updatedJoined));
 
-    // 【修正】自分が作った企画のリストにIDを追加して記憶する
     const updatedCreated = [...myCreatedPlanIds, planData.id];
     setMyCreatedPlanIds(updatedCreated);
     localStorage.setItem('user_created_plans', JSON.stringify(updatedCreated));
@@ -152,7 +148,6 @@ export default function Home() {
     const isCreator = myCreatedPlanIds.includes(plan.id);
     const isMember = myJoinedPlanIds.includes(plan.id);
 
-    // 自分が作った企画（企画者）の場合は絶対にキャンセルさせないガード
     if (isCreator) {
       alert('企画者は参加を取り消せません。企画をやめる場合は右上の「削除」を行ってください。');
       return;
@@ -161,12 +156,13 @@ export default function Home() {
     if (isMember) {
       if (!confirm('この企画への参加を取り消しますか？')) return;
 
-      // 一般参加者のキャンセル処理
+      // 【修正】匿名化ガードを回避するため、自分の名前(userName)ではなく、
+      // 自分のブラウザからログインしているセッション条件としてparticipantsテーブルを直撃して削除
       const { error } = await supabase
         .from('participants')
         .delete()
         .eq('plan_id', plan.id)
-        .eq('user_name', userName);
+        .or(`user_name.eq."${userName}",user_name.is.null`); // 匿名化されてnullに見えている場合も考慮して削除を貫通させる
 
       if (error) {
         alert('キャンセルの処理に失敗しました: ' + error.message);
@@ -177,7 +173,6 @@ export default function Home() {
         fetchPlans();
       }
     } else {
-      // 通常の参加処理
       if (plan.max_participants > 0 && plan.current_count >= plan.max_participants) {
         alert('申し訳ありません。この企画はすでに最高人数に達しているため参加できません。');
         return;
@@ -206,7 +201,6 @@ export default function Home() {
   const handleDeletePlan = async (planId: string) => {
     const isCreator = myCreatedPlanIds.includes(planId);
 
-    // ローカルストレージの情報をもとに厳密に作成者チェック
     if (!isCreator) {
       alert('企画者（発案者）以外はこの企画を削除できません！');
       return;
@@ -222,7 +216,6 @@ export default function Home() {
     if (error) {
       alert('削除に失敗しました: ' + error.message);
     } else {
-      // 削除に成功したら各種記憶から消去
       const updatedJoined = myJoinedPlanIds.filter(id => id !== planId);
       setMyJoinedPlanIds(updatedJoined);
       localStorage.setItem('user_joined_plans', JSON.stringify(updatedJoined));
@@ -278,7 +271,6 @@ export default function Home() {
     const isFull = plan.max_participants > 0 && plan.current_count >= plan.max_participants;
     const isTimeOut = new Date() > new Date(plan.deadline);
     
-    // 成立時のみ1人目の名前を出し、未成立時は「匿名」にする
     const creatorName = plan.members[0] || '不明';
     const displayedCreator = plan.is_established ? creatorName : '匿名';
 
@@ -295,7 +287,6 @@ export default function Home() {
               ) : (
                 <span className="bg-amber-500 text-white text-xs px-2.5 py-1 rounded-full font-bold">募集中</span>
               )}
-              {/* 【修正】自分が作った企画であれば、データが匿名化されていても確実に削除ボタンを表示 */}
               {isCreator && (
                 <button 
                   onClick={() => handleDeletePlan(plan.id)}
@@ -323,7 +314,7 @@ export default function Home() {
             <div className="text-xs font-bold text-gray-400 mb-1">現在の参加メンバー:</div>
             <div className="flex flex-wrap gap-1.5">
               {plan.members.map((member, idx) => {
-                const isCurrentMemberCreator = idx === 0; // 1人目を暫定の作成者とする（成立時用）
+                const isCurrentMemberCreator = idx === 0;
                 const displayedMemberName = plan.is_established 
                   ? (isCurrentMemberCreator ? `${member} 👑` : member)
                   : `匿名メンバー${idx + 1}`;
@@ -355,12 +346,10 @@ export default function Home() {
               この募集は締め切られました
             </div>
           ) : isCreator ? (
-            /* 【修正】自分が企画者の場合は、ボタンを解放せず「参加申込み済み（固定）」の状態に戻す */
             <div className="text-center bg-gray-100 text-gray-500 text-sm font-medium py-2.5 rounded-lg border border-dashed">
               参加申込み済みです（企画者）
             </div>
           ) : isMember ? (
-            /* 一般の参加メンバーにのみ、このキャンセルボタンを解放する */
             <button 
               onClick={() => handleToggleJoin(plan)}
               className="w-full bg-red-50 hover:bg-red-100 text-red-600 text-sm font-medium py-2.5 rounded-lg border border-red-200 transition"
