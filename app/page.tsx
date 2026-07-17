@@ -19,6 +19,7 @@ interface Plan {
   current_count: number;
   is_established: boolean;
   members: string[];
+  user_id: string; // 企画作成者のデバイスID
 }
 
 export default function Home() {
@@ -26,6 +27,7 @@ export default function Home() {
   const [showModal, setShowModal] = useState(false);
   
   const [userName, setUserName] = useState<string>('');
+  const [deviceId, setDeviceId] = useState<string>('');
   const [isRegistered, setIsRegistered] = useState<boolean>(false);
   const [inputName, setInputName] = useState<string>('');
 
@@ -34,42 +36,34 @@ export default function Home() {
   const [description, setDescription] = useState('');
   const [targetDate, setTargetDate] = useState('');
   const [location, setLocation] = useState('');
-  // 【修正】入力バグを防ぐため、最低人数も一時的に文字列で管理
   const [minParticipants, setMinParticipants] = useState<string>('2');
   const [maxParticipants, setMaxParticipants] = useState<string>('');
   const [deadline, setDeadline] = useState('');
 
   const [myJoinedPlanIds, setMyJoinedPlanIds] = useState<string[]>([]);
-  const [myNameHistory, setMyNameHistory] = useState<string[]>([]);
 
   useEffect(() => {
+    // 【重要】ブラウザ固有の秘密の鍵（デバイスID）を生成または取得
+    let savedDeviceId = localStorage.getItem('user_device_id');
+    if (!savedDeviceId) {
+      savedDeviceId = 'usr_' + Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
+      localStorage.setItem('user_device_id', savedDeviceId);
+    }
+    setDeviceId(savedDeviceId);
+
     const savedName = localStorage.getItem('user_board_name');
     if (savedName && savedName.trim() !== '') {
-      const activeName = savedName.trim();
-      setUserName(activeName);
+      setUserName(savedName.trim());
       setIsRegistered(true);
-      
-      const savedJoined = localStorage.getItem('user_joined_plans');
-      if (savedJoined) {
-        setMyJoinedPlanIds(JSON.parse(savedJoined));
-      }
-      
-      const savedHistory = localStorage.getItem('user_name_history');
-      if (savedHistory) {
-        setMyNameHistory(JSON.parse(savedHistory));
-      } else {
-        setMyNameHistory([activeName]);
-      }
-      
-      fetchPlans(activeName);
+      fetchPlans(savedDeviceId);
     } else {
       handleLogoutUser();
     }
   }, []);
 
-  const fetchPlans = async (currentUserName?: string) => {
-    const activeName = currentUserName || userName;
-    if (!activeName || activeName.trim() === '') return;
+  const fetchPlans = async (currentDeviceId?: string) => {
+    const activeDeviceId = currentDeviceId || deviceId;
+    if (!activeDeviceId) return;
 
     const { data: plansData, error: plansError } = await supabase
       .from('plans')
@@ -89,17 +83,18 @@ export default function Home() {
       return;
     }
 
-    const savedJoined = localStorage.getItem('user_joined_plans');
-    const localJoinedIds: string[] = savedJoined ? JSON.parse(savedJoined) : [];
-    const realJoinedIds = [...localJoinedIds];
+    const realJoinedIds: string[] = [];
 
     const formattedPlans = (plansData || []).map((plan: any) => {
-      const membersList = (participantsData || [])
-        .filter((p: any) => p.plan_id === plan.id && p.user_name && p.user_name.trim() !== '')
-        .map((p: any) => p.user_name.trim());
+      // 該当する企画の参加者データを抽出
+      const planParticipants = (participantsData || [])
+        .filter((p: any) => p.plan_id === plan.id && p.user_name && p.user_name.trim() !== '');
       
-      const hasAnyNameInDb = membersList.some(m => m === activeName || myNameHistory.includes(m));
-      if (hasAnyNameInDb && !realJoinedIds.includes(plan.id)) {
+      const membersList = planParticipants.map((p: any) => p.user_name.trim());
+      
+      // 【セキュリティ修正】名前ではなく、秘密の鍵（user_id）が一致しているかで自分の参加状態を100%厳密に判定
+      const isMeJoined = planParticipants.some((p: any) => p.user_id === activeDeviceId);
+      if (isMeJoined) {
         realJoinedIds.push(plan.id);
       }
 
@@ -126,30 +121,22 @@ export default function Home() {
     if (!inputName.trim()) return;
     const newName = inputName.trim();
     
-    const savedHistory = localStorage.getItem('user_name_history');
-    let updatedHistory = savedHistory ? JSON.parse(savedHistory) : [];
-    if (!updatedHistory.includes(newName)) {
-      updatedHistory.push(newName);
-    }
-    
     localStorage.setItem('user_board_name', newName);
-    localStorage.setItem('user_name_history', JSON.stringify(updatedHistory));
-    
     setUserName(newName);
-    setMyNameHistory(updatedHistory);
     setIsRegistered(true);
-    fetchPlans(newName);
+    fetchPlans(deviceId);
   };
 
+  // 名前変更時も秘密の鍵（user_id）はブラウザに残すことで、過去の投稿権限・多重参加防止を維持！
   const handleLogoutUser = () => {
     localStorage.removeItem('user_board_name');
+    localStorage.removeItem('user_joined_plans');
     setUserName('');
     setIsRegistered(false);
     setInputName('');
     setPlans([]);
   };
 
-  // 【修正】キャンセル時や投稿後にフォームを綺麗に初期化する関数
   const resetFormFields = () => {
     setTitle('');
     setDescription('');
@@ -162,29 +149,29 @@ export default function Home() {
 
   const handleCreatePlan = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!userName || userName.trim() === '') return;
+    if (!userName || !deviceId) return;
     
     const minNum = Number(minParticipants);
     if (!title || !deadline || isNaN(minNum) || minNum < 2) {
-      alert('必須項目（企画名・2人以上の最低人数・募集期限）を正しく入力してください');
+      alert('必須項目を正しく入力してください');
       return;
     }
 
     const formattedDate = targetDate ? new Date(targetDate).toLocaleString('ja-JP') : '未定（メンバーで調整）';
     const maxNum = maxParticipants ? Number(maxParticipants) : 0;
 
-    const secureDescription = `${description}\n\n[owner:${userName}]`;
-
+    // 【セキュリティ修正】plansテーブルのuser_id列に、作成者の秘密の鍵をしっかりと刻印
     const { data: planData, error: planError } = await supabase
       .from('plans')
       .insert([{
         title,
-        description: secureDescription,
+        description,
         target_date: formattedDate,
         location: location || '未定',
         max_participants: maxNum,
         min_participants: minNum,
-        deadline: new Date(deadline).toISOString()
+        deadline: new Date(deadline).toISOString(),
+        user_id: deviceId 
       }])
       .select()
       .single();
@@ -194,38 +181,28 @@ export default function Home() {
       return;
     }
 
+    // 参加者レコードにも秘密の鍵を紐付けて登録
     await supabase
       .from('participants')
-      .insert([{ plan_id: planData.id, user_name: userName }]);
+      .insert([{ plan_id: planData.id, user_name: userName, user_id: deviceId }]);
 
     const updatedJoined = [...myJoinedPlanIds, planData.id];
     setMyJoinedPlanIds(updatedJoined);
     localStorage.setItem('user_joined_plans', JSON.stringify(updatedJoined));
 
     setShowModal(false);
-    // 【修正】次回作成時に残らないようフォームをリセット
     resetFormFields();
-    
     await fetchPlans();
   };
 
-  const getPlanOwner = (planDescription: string): string => {
-    const match = planDescription.match(/\[owner:(.*?)\]$/);
-    return match ? match[1] : '';
-  };
-
-  const getCleanDescription = (planDescription: string): string => {
-    return planDescription.replace(/\n\n\[owner:.*?\]$/, '');
-  };
-
   const handleToggleJoin = async (plan: Plan) => {
-    if (!userName || userName.trim() === '') return;
+    if (!userName || !deviceId) return;
 
-    const creatorName = getPlanOwner(plan.description);
-    const isCreator = myNameHistory.includes(creatorName) || userName === creatorName || creatorName === '';
+    // 【セキュリティ修正】名前ではなく、埋め込まれたデバイスIDが一致するかで企画者判定
+    const isCreator = plan.user_id === deviceId;
     const isMember = myJoinedPlanIds.includes(plan.id);
 
-    if (isCreator && creatorName !== '') {
+    if (isCreator) {
       alert('企画者は参加を取り消せません。企画をやめる場合は右上の「削除」を行ってください。');
       return;
     }
@@ -233,13 +210,12 @@ export default function Home() {
     if (isMember) {
       if (!confirm('この企画への参加を取り消しますか？')) return;
 
-      const targetDeleteName = plan.members.find(m => m === userName) || plan.members.find(m => myNameHistory.includes(m)) || userName;
-
+      // 【セキュリティ修正】自分の秘密の鍵（user_id）が一致する行を狙い撃ちで安全に削除
       const { error } = await supabase
         .from('participants')
         .delete()
         .eq('plan_id', plan.id)
-        .eq('user_name', targetDeleteName);
+        .eq('user_id', deviceId);
 
       if (error) {
         alert('キャンセルの処理に失敗しました: ' + error.message);
@@ -257,14 +233,10 @@ export default function Home() {
 
       const { error } = await supabase
         .from('participants')
-        .insert([{ plan_id: plan.id, user_name: userName }]);
+        .insert([{ plan_id: plan.id, user_name: userName, user_id: deviceId }]);
 
       if (error) {
-        if (error.code === '23505') {
-          alert('すでにこの企画に参加しています');
-        } else {
-          alert('参加に失敗しました: ' + error.message);
-        }
+        alert('参加に失敗しました: ' + error.message);
       } else {
         const updatedJoined = [...myJoinedPlanIds, plan.id];
         setMyJoinedPlanIds(updatedJoined);
@@ -275,10 +247,10 @@ export default function Home() {
   };
 
   const handleDeletePlan = async (plan: Plan) => {
-    const creatorName = getPlanOwner(plan.description);
-    const isCreator = myNameHistory.includes(creatorName) || userName === creatorName || creatorName === '';
+    // 【セキュリティ修正】作成者のデバイスIDが一致しない限り絶対削除不可
+    const isCreator = plan.user_id === deviceId;
 
-    if (!isCreator && creatorName !== '') {
+    if (!isCreator) {
       alert('企画者（発案者）以外はこの企画を削除できません！');
       return;
     }
@@ -338,13 +310,12 @@ export default function Home() {
     const isFull = plan.max_participants > 0 && plan.current_count >= plan.max_participants;
     const isTimeOut = new Date() > new Date(plan.deadline);
     
-    const creatorName = getPlanOwner(plan.description) || plan.members[0] || '不明';
+    // 1人目のメンバー、または不明
+    const creatorName = plan.members[0] || '不明';
     const displayedCreator = plan.is_established ? creatorName : '匿名';
 
-    const isCreator = myNameHistory.includes(creatorName) || userName === creatorName;
+    const isCreator = plan.user_id === deviceId;
     const isMember = myJoinedPlanIds.includes(plan.id);
-
-    const cleanDesc = getCleanDescription(plan.description);
 
     return (
       <div key={plan.id} className={`bg-white rounded-xl shadow-md p-6 border flex flex-col justify-between ${plan.is_established ? 'border-green-400 bg-green-50/20' : 'border-gray-200'}`}>
@@ -372,7 +343,7 @@ export default function Home() {
           </div>
 
           <h2 className="text-xl font-bold text-gray-900 mb-2">{plan.title}</h2>
-          <p className="text-gray-600 text-sm mb-4 whitespace-pre-wrap">{cleanDesc}</p>
+          <p className="text-gray-600 text-sm mb-4 whitespace-pre-wrap">{plan.description}</p>
 
           <div className="bg-gray-50 rounded-lg p-4 space-y-2 text-sm mb-4">
             <div>日時: {plan.target_date}</div>
@@ -391,10 +362,10 @@ export default function Home() {
                     <span 
                       key={idx} 
                       className={`text-xs px-2 py-1 rounded ${
-                        member === creatorName ? 'bg-indigo-100 text-indigo-700 font-medium' : 'bg-gray-200 text-gray-700'
+                        idx === 0 ? 'bg-indigo-100 text-indigo-700 font-medium' : 'bg-gray-200 text-gray-700'
                       }`}
                     >
-                      {member} {member === creatorName && '👑'}
+                      {member} {idx === 0 && '👑'}
                     </span>
                   ))}
                 </div>
@@ -499,7 +470,6 @@ export default function Home() {
                 <div>
                   <div className="flex justify-between items-center mb-1">
                     <label className="block text-xs font-bold text-gray-500">実施日時(空欄で未定)</label>
-                    {/* 【修正】一度選択した日時を未定に戻せるリセットボタン */}
                     {targetDate && (
                       <button type="button" onClick={() => setTargetDate('')} className="text-[10px] text-red-500 hover:underline">✕ 未定に戻す</button>
                     )}
@@ -514,7 +484,6 @@ export default function Home() {
               <div className="grid grid-cols-2 gap-2">
                 <div>
                   <label className="block text-xs font-bold text-gray-500 mb-1">最低人数 *</label>
-                  {/* 【修正】03などのバグを防ぐため、文字列のまま管理してスムーズな入力を実現 */}
                   <input type="number" min={2} required value={minParticipants} onChange={(e) => setMinParticipants(e.target.value)} className="w-full border rounded-lg p-2 text-sm" />
                 </div>
                 <div>
@@ -527,7 +496,6 @@ export default function Home() {
                 <input type="datetime-local" required value={deadline} onChange={(e) => setDeadline(e.target.value)} className="w-full border rounded-lg p-2 text-sm" />
               </div>
               <div className="flex justify-end gap-2 pt-2">
-                {/* 【修正】キャンセルボタンを押したときも中身を綺麗にリセットする */}
                 <button type="button" onClick={() => { setShowModal(false); resetFormFields(); }} className="bg-gray-100 hover:bg-gray-200 text-gray-600 font-medium py-2 px-4 rounded-lg text-sm">キャンセル</button>
                 <button type="submit" className="bg-indigo-600 hover:bg-indigo-700 text-white font-medium py-2 px-4 rounded-lg text-sm">公開する</button>
               </div>
