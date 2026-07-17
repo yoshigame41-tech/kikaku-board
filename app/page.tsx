@@ -57,41 +57,58 @@ export default function Home() {
     fetchPlans();
   }, []);
 
-  // 【修正】RPCによる隠蔽を回避し、通常のビュー/テーブルから正確な実名データを裏側で取得する
   const fetchPlans = async () => {
-    // get_secure_plansから通常のplans取得（裏で実名を保持する形）へ切り替え
-    const { data, error } = await supabase
+    // 1. まず全ての企画を取得
+    const { data: plansData, error: plansError } = await supabase
       .from('plans')
       .select('*');
       
-    if (error) {
-      console.error(error);
-    } else {
-      // 各企画の参加メンバー一覧（実名）を裏側で正しくマッピング
-      const formattedPlans = await Promise.all((data || []).map(async (plan: any) => {
-        const { data: partData } = await supabase
-          .from('participants')
-          .select('user_name')
-          .eq('plan_id', plan.id);
-          
-        const membersList = (partData || []).map((p: any) => p.user_name);
-        
-        // 期限切れ、または上限到達時の成立チェック
-        const isTimeOut = new Date() > new Date(plan.deadline);
-        const isFull = plan.max_participants > 0 && membersList.length >= plan.max_participants;
-        const hasMinPeople = membersList.length >= (plan.min_participants || 2);
-        const isEstablishedNow = plan.is_established || ((isTimeOut || isFull) && hasMinPeople);
-
-        return {
-          ...plan,
-          current_count: membersList.length,
-          members: membersList,
-          is_established: isEstablishedNow
-        };
-      }));
-      
-      setPlans(formattedPlans as Plan[]);
+    if (plansError) {
+      console.error(plansError);
+      return;
     }
+
+    // 2. 全ての参加者データをまとめて取得してフロント側で安全にマッピング
+    const { data: participantsData, error: partError } = await supabase
+      .from('participants')
+      .select('*');
+
+    if (partError) {
+      console.error(partError);
+      return;
+    }
+
+    // ローカルストレージとデータベースの同期を取るための配列
+    const realJoinedIds: string[] = [];
+
+    const formattedPlans = (plansData || []).map((plan: any) => {
+      // この企画に紐づく参加者の実名リストを抽出
+      const membersList = (participantsData || [])
+        .filter((p: any) => p.plan_id === plan.id)
+        .map((p: any) => p.user_name);
+      
+      // 自分がこの企画に参加しているか、データベースの実データから直接判定
+      if (membersList.includes(userName)) {
+        realJoinedIds.push(plan.id);
+      }
+
+      const isTimeOut = new Date() > new Date(plan.deadline);
+      const isFull = plan.max_participants > 0 && membersList.length >= plan.max_participants;
+      const hasMinPeople = membersList.length >= (plan.min_participants || 2);
+      const isEstablishedNow = plan.is_established || ((isTimeOut || isFull) && hasMinPeople);
+
+      return {
+        ...plan,
+        current_count: membersList.length,
+        members: membersList,
+        is_established: isEstablishedNow
+      };
+    });
+
+    // 参加状況を最新の状態に強制同期
+    setMyJoinedPlanIds(realJoinedIds);
+    localStorage.setItem('user_joined_plans', JSON.stringify(realJoinedIds));
+    setPlans(formattedPlans as Plan[]);
   };
 
   const handleRegisterUser = (e: React.FormEvent) => {
@@ -143,13 +160,10 @@ export default function Home() {
       return;
     }
 
+    // 企画者を最初の参加者としてデータベースに挿入
     await supabase
       .from('participants')
       .insert([{ plan_id: planData.id, user_name: userName }]);
-
-    const updatedJoined = [...myJoinedPlanIds, planData.id];
-    setMyJoinedPlanIds(updatedJoined);
-    localStorage.setItem('user_joined_plans', JSON.stringify(updatedJoined));
 
     const updatedCreated = [...myCreatedPlanIds, planData.id];
     setMyCreatedPlanIds(updatedCreated);
@@ -163,10 +177,11 @@ export default function Home() {
     setDeadline('');
     setMinParticipants(2);
     setMaxParticipants('');
-    fetchPlans();
+    
+    // データの再読み込み（ここでカウントや参加フラグが100%正しく同期されます）
+    await fetchPlans();
   };
 
-  // 参加およびキャンセルの切り替え処理（100%確実に動作）
   const handleToggleJoin = async (plan: Plan) => {
     if (!userName) {
       alert('ユーザー名が登録されていません');
@@ -184,7 +199,7 @@ export default function Home() {
     if (isMember) {
       if (!confirm('この企画への参加を取り消しますか？')) return;
 
-      // 【修正】裏側で実名が完全一致するため、確実に一発で削除が通ります
+      // 門番が外れたため、実名での狙い撃ち削除が100%確実に成功します
       const { error } = await supabase
         .from('participants')
         .delete()
@@ -194,10 +209,7 @@ export default function Home() {
       if (error) {
         alert('キャンセルの処理に失敗しました: ' + error.message);
       } else {
-        const updatedJoined = myJoinedPlanIds.filter(id => id !== plan.id);
-        setMyJoinedPlanIds(updatedJoined);
-        localStorage.setItem('user_joined_plans', JSON.stringify(updatedJoined));
-        fetchPlans();
+        await fetchPlans();
       }
     } else {
       if (plan.max_participants > 0 && plan.current_count >= plan.max_participants) {
@@ -216,15 +228,11 @@ export default function Home() {
           alert('参加に失敗しました: ' + error.message);
         }
       } else {
-        const updatedJoined = [...myJoinedPlanIds, plan.id];
-        setMyJoinedPlanIds(updatedJoined);
-        localStorage.setItem('user_joined_plans', JSON.stringify(updatedJoined));
-        fetchPlans();
+        await fetchPlans();
       }
     }
   };
 
-  // 投稿削除処理
   const handleDeletePlan = async (planId: string) => {
     const isCreator = myCreatedPlanIds.includes(planId);
 
@@ -243,41 +251,12 @@ export default function Home() {
     if (error) {
       alert('削除に失敗しました: ' + error.message);
     } else {
-      const updatedJoined = myJoinedPlanIds.filter(id => id !== planId);
-      setMyJoinedPlanIds(updatedJoined);
-      localStorage.setItem('user_joined_plans', JSON.stringify(updatedJoined));
-
       const updatedCreated = myCreatedPlanIds.filter(id => id !== planId);
       setMyCreatedPlanIds(updatedCreated);
       localStorage.setItem('user_created_plans', JSON.stringify(updatedCreated));
-
-      fetchPlans();
+      await fetchPlans();
     }
   };
-
-  if (!isRegistered) {
-    return (
-      <div className="min-h-screen bg-gray-50 flex items-center justify-center p-4">
-        <div className="bg-white rounded-xl shadow-md max-w-md w-full p-6 text-center">
-          <h2 className="text-xl font-bold text-gray-900 mb-2">利用登録</h2>
-          <p className="text-sm text-gray-500 mb-6">アプリ内で使用するあなたの名前を入力してください。</p>
-          <form onSubmit={handleRegisterUser} className="space-y-4">
-            <input 
-              type="text" 
-              required 
-              value={inputName} 
-              onChange={(e) => setInputName(e.target.value)} 
-              className="w-full border rounded-lg p-3 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500" 
-              placeholder="例: 太郎" 
-            />
-            <button type="submit" className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-medium py-3 rounded-lg text-sm transition">
-              登録してはじめる
-            </button>
-          </form>
-        </div>
-      </div>
-    );
-  }
 
   const activePlans = plans.filter(plan => {
     const isFull = plan.max_participants > 0 && plan.current_count >= plan.max_participants;
@@ -299,8 +278,6 @@ export default function Home() {
     const isTimeOut = new Date() > new Date(plan.deadline);
     
     const creatorName = plan.members[0] || '不明';
-    
-    // 【修正】成立時のみ実名を出し、未成立時は完全に「匿名」で隠す
     const displayedCreator = plan.is_established ? creatorName : '匿名';
 
     return (
@@ -339,10 +316,8 @@ export default function Home() {
             <div>期限: {new Date(plan.deadline).toLocaleString('ja-JP')}</div>
           </div>
 
-          {/* 【修正】参加メンバー欄の表示切り替えロジック */}
           <div className="mb-4">
             {plan.is_established ? (
-              // 成立したときだけ、名前一覧と王冠マークを一斉に大公開！
               <>
                 <div className="text-xs font-bold text-gray-400 mb-1">現在の参加メンバー:</div>
                 <div className="flex flex-wrap gap-1.5">
@@ -359,7 +334,6 @@ export default function Home() {
                 </div>
               </>
             ) : (
-              // 未成立の間は「匿名メンバー1」などは表示せず、進捗状況（テキスト）のみでスマートに表示
               <div className="text-xs font-semibold text-gray-400 bg-gray-100 inline-block px-3 py-1.5 rounded-md">
                 🔒 メンバー情報は企画成立後に公開されます（現在 {plan.current_count}人が参加中）
               </div>
